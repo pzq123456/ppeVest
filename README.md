@@ -1,0 +1,1 @@
+tar -czvf data.tar.gz .\data
