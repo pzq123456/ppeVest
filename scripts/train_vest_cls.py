@@ -18,7 +18,7 @@ def main():
     model.train(
         data="vest_cls",
         epochs=300,
-        patience=20,
+        patience=50,
         imgsz=224,
         batch=256,
         device=0,

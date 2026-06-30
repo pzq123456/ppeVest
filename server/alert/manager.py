@@ -25,6 +25,7 @@ class AlertManager:
         camera_id: str,
         camera_name: str,
         target_classes: list[str] | None = None,
+        require_all_targets: bool | None = None,
         save_frame_overlay: bool = False,
         cooldown_seconds: float = 30.0,
         min_detection_count: int = 3,
@@ -35,6 +36,7 @@ class AlertManager:
             camera_id: 摄像头唯一 ID
             camera_name: 摄像头显示名称
             target_classes: 触发告警的目标类别列表，None 则匹配所有检测
+            require_all_targets: True 时要求所有 target_classes 同时存在才计数；None（默认）时多类别自动 AND，单类别 OR
             save_frame_overlay: 是否在证据帧上叠加摄像头名称/时间水印
             cooldown_seconds: 同一摄像头两次告警的最小间隔（秒）
             min_detection_count: 连续检测到抽烟的帧数阈值
@@ -43,6 +45,13 @@ class AlertManager:
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.target_classes = target_classes
+        # 智能默认：多类别时默认 AND（如 face+smoking 缺一不可），单类别时 OR；显式指定优先
+        if require_all_targets is None:
+            self.require_all_targets = (
+                len(target_classes) >= 2 if target_classes else False
+            )
+        else:
+            self.require_all_targets = require_all_targets
         self.save_frame_overlay = save_frame_overlay
         self.cooldown_seconds = cooldown_seconds
         self.min_detection_count = min_detection_count
@@ -69,25 +78,35 @@ class AlertManager:
         try:
             # 按配置的目标类别过滤（None 表示匹配所有检测）
             if self.target_classes is not None:
-                smoking_detections = [
-                    d for d in detections if d.class_name in self.target_classes
-                ]
+                if self.require_all_targets:
+                    # 要求所有 target_classes 同时存在才计数（如 face + smoking）
+                    detected_classes = {d.class_name for d in detections}
+                    if not all(cls in detected_classes for cls in self.target_classes):
+                        target_detections = []
+                    else:
+                        target_detections = [
+                            d for d in detections if d.class_name in self.target_classes
+                        ]
+                else:
+                    target_detections = [
+                        d for d in detections if d.class_name in self.target_classes
+                    ]
             else:
-                smoking_detections = detections
+                target_detections = detections
 
-            if smoking_detections:
+            if target_detections:
                 self._consecutive_hits += 1
                 logger.debug(
                     "[{}] 检测到目标: {} 个, 连续 {}/{} 帧",
                     self.camera_name,
-                    len(smoking_detections),
+                    len(target_detections),
                     self._consecutive_hits,
                     self.min_detection_count,
                 )
 
                 if self._consecutive_hits >= self.min_detection_count:
                     if self._cooldown_passed():
-                        self._trigger(frame, smoking_detections)
+                        self._trigger(frame, target_detections)
                         self._consecutive_hits = 0
                         return True
                     else:

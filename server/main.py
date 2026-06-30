@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-抽烟检测服务端入口
+反光衣检测服务端入口
 
 启动方式：
     python -m server.main                  # 使用默认配置 server/config.yaml
@@ -9,9 +9,10 @@
 工作流程：
     1. 加载并校验 YAML 配置
     2. 初始化日志
-    3. 加载 YOLO 模型（所有摄像头共享）
-    4. 为每个 enabled 的摄像头创建 CameraWorker
-    5. 等待退出信号，优雅关闭
+    3. 加载级联模型（YOLO detect → YOLO classify）或单模型（所有摄像头共享）
+    4. 初始化 Webhook 告警推送 + 帧推送客户端
+    5. 为每个 enabled 的摄像头创建 CameraWorker
+    6. 等待退出信号，优雅关闭
 """
 
 import argparse
@@ -31,6 +32,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from server.utils.logger import setup_logger
 from server.core.detector import SmokeDetector
+from server.core.frame_batcher import FrameBatcher
+from server.core.frame_pusher import FramePushClient
 from server.core.streamer import RTSPStreamer, LocalStreamer
 from server.core.camera_worker import CameraWorker
 from server.alert.webhook import WebhookAlerter
@@ -61,8 +64,22 @@ def _validate_config(config: dict, path: Path):
     if "model" not in config:
         errors.append("缺少 'model' 节")
     else:
-        if "path" not in config["model"]:
-            errors.append("model.path 为必填项")
+        model = config["model"]
+        model_type = model.get("type", "single")
+
+        if model_type == "single":
+            if "path" not in model:
+                errors.append("model.path 为必填项 (type=single)")
+        elif model_type == "cascade":
+            for section in ("detect", "classify"):
+                if section not in model:
+                    errors.append(f"model.{section} 为必填项 (type=cascade)")
+            if "detect" in model and "model" not in model["detect"]:
+                errors.append("model.detect.model 为必填项")
+            if "classify" in model and "path" not in model["classify"]:
+                errors.append("model.classify.path 为必填项")
+        else:
+            errors.append(f"model.type 无效: {model_type}，支持 single / cascade")
 
     if "cameras" not in config:
         errors.append("缺少 'cameras' 节")
@@ -105,7 +122,7 @@ def _create_streamer(cam: dict):
 # 主入口
 # ============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="抽烟检测服务端")
+    parser = argparse.ArgumentParser(description="反光衣检测服务端")
     parser.add_argument(
         "--config", "-c",
         default=str(_PROJECT_ROOT / "server" / "config.yaml"),
@@ -120,20 +137,26 @@ def main():
     # 2. 初始化日志
     log_cfg = config.get("log", {})
     logger = setup_logger(
-        name="smoke_detector",
+        name="vest_detector",
         level=log_cfg.get("level", "INFO"),
         log_file=log_cfg.get("file", "logs/server.log"),
     )
     logger.info("=" * 60)
-    logger.info("抽烟检测服务端 启动中...")
+    logger.info("反光衣检测服务端 启动中...")
 
-    # 3. 加载模型
-    model_path = _PROJECT_ROOT / config["model"]["path"]
-    detector = SmokeDetector(
-        model_path=model_path,
-        conf=config["model"].get("conf", 0.35),
-        device=config["model"].get("device", 0),
-    )
+    # 3. 加载模型（解析相对路径）
+    model_cfg = config["model"]
+    if model_cfg.get("type") == "cascade":
+        cls_path = model_cfg["classify"]["path"]
+        p = Path(cls_path)
+        if not p.is_absolute():
+            model_cfg["classify"]["path"] = str(_PROJECT_ROOT / p)
+    elif model_cfg.get("type", "single") == "single":
+        model_path = model_cfg.get("path", "")
+        p = Path(model_path)
+        if model_path and not p.is_absolute():
+            model_cfg["path"] = str(_PROJECT_ROOT / p)
+    detector = SmokeDetector(model_cfg)
 
     # 4. 创建 Webhook 推送器（全局共享一个）
     webhook_cfg = config.get("alert", {}).get("webhook", {})
@@ -148,9 +171,22 @@ def main():
     else:
         logger.warning("未配置 Webhook URL，告警将不会推送")
 
-    # 5. 启动摄像头 Workers
+    # 5. 创建帧推送客户端（全局共享）
+    frame_pusher = None
+    fp_cfg = config.get("frame_push", {})
+    if fp_cfg.get("enabled") and fp_cfg.get("url"):
+        frame_pusher = FramePushClient(
+            url=fp_cfg["url"],
+            timeout=fp_cfg.get("timeout", 10),
+            retries=fp_cfg.get("retries", 2),
+        )
+        logger.info("帧推送已配置 → {}", fp_cfg["url"])
+    else:
+        logger.info("未配置帧推送，帧将不会发送")
+
+    # 6. 启动摄像头 Workers
     alert_cfg = config.get("alert", {})
-    target_classes = config["model"].get("target_classes", ["smoking"])
+    target_classes = config["model"].get("target_classes", ["no_vest"])
     workers: list[CameraWorker] = []
 
     for cam in config["cameras"]:
@@ -162,6 +198,7 @@ def main():
             camera_id=cam["id"],
             camera_name=cam["name"],
             target_classes=target_classes,
+            require_all_targets=alert_cfg.get("require_all_targets"),
             save_frame_overlay=alert_cfg.get("save_frame_overlay", False),
             cooldown_seconds=alert_cfg.get("cooldown_seconds", 30),
             min_detection_count=alert_cfg.get("min_detection_count", 3),
@@ -170,12 +207,23 @@ def main():
 
         streamer = _create_streamer(cam)
 
+        batcher = None
+        if frame_pusher:
+            batcher = FrameBatcher(
+                camera_id=cam["id"],
+                batch_interval_ms=fp_cfg.get("batch_interval_ms", 1000),
+                max_frames=fp_cfg.get("max_frames_per_batch", 15),
+                jpeg_quality=fp_cfg.get("jpeg_quality", 70),
+            )
+
         worker = CameraWorker(
             camera_id=cam["id"],
             camera_name=cam["name"],
             streamer=streamer,
             detector=detector,
             alert_manager=alert_mgr,
+            frame_batcher=batcher,
+            frame_pusher=frame_pusher,
         )
         worker.start()
         workers.append(worker)
@@ -186,7 +234,7 @@ def main():
 
     logger.info("已启动 {} 路摄像头，运行中... (Ctrl+C 停止)", len(workers))
 
-    # 6. 等待退出信号 + Worker 健康监控
+    # 7. 等待退出信号 + Worker 健康监控
     #    不使用 signal 模块（Windows 下与 GPU 线程交互时有不可靠问题），
     #    改用简单的 KeyboardInterrupt 轮询。
     HEALTH_CHECK_INTERVAL = 30  # 每 30 秒检查一次 Worker 存活状态
@@ -208,7 +256,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("收到 Ctrl+C，准备退出...")
 
-    # 7. 优雅退出
+    # 8. 优雅退出
     logger.info("正在停止所有 Worker...")
     for worker in workers:
         worker.stop()

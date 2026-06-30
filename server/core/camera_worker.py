@@ -11,6 +11,8 @@ import threading
 from loguru import logger
 
 from server.core.detector import SmokeDetector, Detection
+from server.core.frame_batcher import FrameBatcher
+from server.core.frame_pusher import FramePushClient
 from server.alert.manager import AlertManager
 
 
@@ -24,6 +26,8 @@ class CameraWorker:
         streamer,           # RTSPStreamer | LocalStreamer — 任何有 read()/stop()/connected 的对象
         detector: SmokeDetector,
         alert_manager: AlertManager,
+        frame_batcher: FrameBatcher | None = None,
+        frame_pusher: FramePushClient | None = None,
         status_interval: int = 100,
         summary_interval: float = 60.0,
     ):
@@ -42,6 +46,8 @@ class CameraWorker:
         self._streamer = streamer
         self.detector = detector
         self.alert_manager = alert_manager
+        self._frame_batcher = frame_batcher
+        self._frame_pusher = frame_pusher
         self.status_interval = status_interval
         self.summary_interval = summary_interval
 
@@ -111,7 +117,22 @@ class CameraWorker:
                     except Exception:
                         logger.exception("[{}] 告警处理异常", self.camera_name)
 
-                # 4. 统计
+                # 4. 帧推送：标注帧 → 加入批次 → 到时间窗口后发送
+                if self._frame_batcher and self._frame_pusher:
+                    try:
+                        annotated = self.detector.annotate_frame(frame, detections)
+                        seq = self._frame_batcher.add(annotated)
+                        if seq is not None:
+                            seq, batch = self._frame_batcher.drain()
+                            if batch:
+                                self._frame_pusher.send(
+                                    self.camera_id, self.camera_name,
+                                    seq, batch, self._frame_batcher.jpeg_quality,
+                                )
+                    except Exception:
+                        logger.exception("[{}] 帧推送异常", self.camera_name)
+
+                # 5. 统计
                 frame_count += 1
 
                 # -- DEBUG: 逐帧统计（仅 DEBUG 级别可见） --

@@ -1,5 +1,5 @@
 # =============================================================================
-# 抽烟检测服务端 配置文件
+# 反光衣检测服务端 配置文件
 # =============================================================================
 # 修改此文件后重启服务即可生效，无需改动任何代码。
 # =============================================================================
@@ -8,10 +8,38 @@
 # 模型参数
 # -----------------------------------------------------------------------------
 model:
-  path: "runs/detect/yolo26m_smoking_20260626_0601/weights/best.pt"   # YOLO 权重路径（相对于项目根目录）
-  conf: 0.35                                                           # 置信度阈值
-  device: 0                                                            # GPU 设备 ID，null 或 "cpu" 表示 CPU
-  target_classes: ['cigarette']                                        # 触发告警的目标类别（必须与模型类别名一致）
+  type: "cascade"                  # "single" (单模型检测) | "cascade" (级联: 检测+分类)
+
+  # --- single 模式配置 ---
+  # path: "runs/detect/yolo26s_smoking_20260625_0033/weights/best.pt"
+  # conf:
+  #   face: 0.5
+  #   smoking: 0.25
+
+  # --- cascade 模式配置 ---
+  detect:                          # 第一级：人体检测
+    model: "yolo11n.pt"            # 纯文件名 → 自动下载；相对路径 → 本地
+    conf: 0.35
+    target_class_id: 0             # COCO person = 0
+  classify:                        # 第二级：反光衣分类
+    path: "runs/yolo26n_vest_cls_20260630_1107/weights/best.pt"
+    conf: 0.5
+    labels: {0: "no_vest", 1: "vest"}    # 0=no_vest(未穿), 1=vest(已穿)
+
+  device: 0                        # GPU 设备 ID，null 或 "cpu" 表示 CPU
+  target_classes: ["no_vest"]       # 触发告警的目标类别（仅违规类）
+
+# -----------------------------------------------------------------------------
+# 帧推送配置
+# -----------------------------------------------------------------------------
+frame_push:
+  enabled: true
+  url: "http://localhost:8080/api/vest-frames"  # 对方提供的接收地址
+  batch_interval_ms: 1000        # 批次间隔（毫秒）
+  max_frames_per_batch: 15       # 单批次帧数上限
+  jpeg_quality: 70               # JPEG 编码质量 (1-100)
+  timeout: 10                    # HTTP 请求超时（秒）
+  retries: 2                     # 失败重试次数
 
 # -----------------------------------------------------------------------------
 # 摄像头列表
@@ -37,13 +65,13 @@ cameras:
 # -----------------------------------------------------------------------------
 alert:
   cooldown_seconds: 10           # 同一摄像头两次告警的最小间隔（秒）
-  min_detection_count: 1         # 连续检测到抽烟的帧数阈值（防止单帧误报）
+  min_detection_count: 1         # 连续检测到目标的帧数阈值（防止单帧误报）
   save_frame_overlay: false      # 是否在证据帧上叠加摄像头名称/时间水印（摄像头流已自带则无需）
 
   webhook:
-    url: "http://localhost:9999/api/smoke-alert"   # Webhook 接收地址
-    timeout: 10                                     # 请求超时（秒）
-    retries: 2                                      # 失败重试次数
+    url: "http://localhost:9999/api/vest-alert"  # Webhook 接收地址
+    timeout: 10                                   # 请求超时（秒）
+    retries: 2                                    # 失败重试次数
 
 # -----------------------------------------------------------------------------
 # 日志参数
