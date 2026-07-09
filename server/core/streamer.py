@@ -34,7 +34,7 @@ class RTSPStreamer:
         self.max_reconnect_delay = max_reconnect_delay
 
         self._frame = None
-        self._stopped = False
+        self._stopped = threading.Event()
         self._connected = False
         self._lock = threading.Lock()
 
@@ -77,7 +77,7 @@ class RTSPStreamer:
         """后台线程：持续读取帧，断线时尝试重连。"""
         delay = self.reconnect_delay
 
-        while not self._stopped:
+        while not self._stopped.is_set():
             try:
                 if not self._connected:
                     # 重连逻辑
@@ -85,7 +85,8 @@ class RTSPStreamer:
                         logger.info(
                             "尝试重连 ({:.1f}s 后)...: {}", delay, self.rtsp_url
                         )
-                        time.sleep(delay)
+                        if self._stopped.wait(delay):
+                            break
                         if self._connect():
                             delay = self.reconnect_delay  # 重置延迟
                             continue
@@ -93,7 +94,7 @@ class RTSPStreamer:
                             delay = min(delay * 2, self.max_reconnect_delay)
                             continue
                     else:
-                        time.sleep(1)
+                        self._stopped.wait(1)
                         continue
 
                 # 正常读取
@@ -117,7 +118,7 @@ class RTSPStreamer:
                 )
                 self._release()
                 delay = self.reconnect_delay
-                time.sleep(1)
+                self._stopped.wait(1)
 
         self._release()
 
@@ -135,7 +136,7 @@ class RTSPStreamer:
 
     def stop(self):
         """停止读取线程并释放资源。"""
-        self._stopped = True
+        self._stopped.set()
         self._thread.join(timeout=5)
         self._release()
         logger.info("RTSP 流已停止: {}", self.rtsp_url)
@@ -154,7 +155,7 @@ class LocalStreamer:
         """
         self.device_id = device_id
         self._frame = None
-        self._stopped = False
+        self._stopped = threading.Event()
         self._connected = False
         self._lock = threading.Lock()
 
@@ -188,10 +189,10 @@ class LocalStreamer:
         self._connected = False
 
     def _update_loop(self):
-        while not self._stopped:
+        while not self._stopped.is_set():
             try:
                 if not self._connected:
-                    time.sleep(1)
+                    self._stopped.wait(1)
                     continue
 
                 try:
@@ -211,7 +212,7 @@ class LocalStreamer:
                     "本地摄像头线程未预期异常，1s 后尝试恢复: device_id={}", self.device_id
                 )
                 self._release()
-                time.sleep(1)
+                self._stopped.wait(1)
 
         self._release()
 
@@ -226,7 +227,7 @@ class LocalStreamer:
 
     def stop(self):
         """停止读取线程并释放摄像头。"""
-        self._stopped = True
+        self._stopped.set()
         self._thread.join(timeout=5)
         self._release()
         logger.info("本地摄像头已停止: device_id={}", self.device_id)

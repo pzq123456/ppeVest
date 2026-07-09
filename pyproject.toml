@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.138.1",
     "loguru>=0.7.3",
     "opencv-python",
+    "simplejpeg>=1.9.0",
     "torch",      # 会从专用索引安装 CUDA 版本
     "torchvision", # 会从专用索引安装 CUDA 版本
     "ultralytics",

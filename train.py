@@ -7,19 +7,19 @@ def main():
     SETTINGS["tensorboard"] = True
     
     current_time = datetime.now().strftime("%Y%m%d_%H%M")
-    run_name = f"yolo26s_ppeVest_{current_time}"
+    run_name = f"yolo26cls_ppeVest_{current_time}"
     
-    model = YOLO("yolo26s.pt")
+    model = YOLO("yolo26n-cls.pt")
 
     model.train(
-        data="data/data.yaml",
+        data="vest_cls2",
         epochs=300,
-        patience=50,
-        imgsz=640,
+        patience=100,
+        imgsz=320,
         batch=128,
         device=-1,
         name=run_name,
-        workers=8,
+        workers=4
     )
 
 if __name__ == "__main__":

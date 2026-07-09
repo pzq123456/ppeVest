@@ -48,7 +48,7 @@ class WebhookAlerter:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     status = resp.status
                     if 200 <= status < 300:
-                        logger.info("Webhook 发送成功 (status={}): {}", status, self.url)
+                        logger.debug("Webhook 发送成功 (status={}): {}", status, self.url)
                         return True
                     else:
                         logger.warning(

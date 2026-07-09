@@ -1,5 +1,5 @@
 # =============================================================================
-# 反光衣检测服务端 配置文件
+# 抽烟检测服务端 配置文件
 # =============================================================================
 # 修改此文件后重启服务即可生效，无需改动任何代码。
 # =============================================================================
@@ -8,38 +8,13 @@
 # 模型参数
 # -----------------------------------------------------------------------------
 model:
-  type: "cascade"                  # "single" (单模型检测) | "cascade" (级联: 检测+分类)
-
-  # --- single 模式配置 ---
-  # path: "runs/detect/yolo26s_smoking_20260625_0033/weights/best.pt"
-  # conf:
-  #   face: 0.5
-  #   smoking: 0.25
-
-  # --- cascade 模式配置 ---
-  detect:                          # 第一级：人体检测
-    model: "yolo11n.pt"            # 纯文件名 → 自动下载；相对路径 → 本地
-    conf: 0.35
-    target_class_id: 0             # COCO person = 0
-  classify:                        # 第二级：反光衣分类
-    path: "runs/yolo26n_vest_cls_20260630_1107/weights/best.pt"
-    conf: 0.5
-    labels: {0: "no_vest", 1: "vest"}    # 0=no_vest(未穿), 1=vest(已穿)
-
-  device: 0                        # GPU 设备 ID，null 或 "cpu" 表示 CPU
-  target_classes: ["no_vest"]       # 触发告警的目标类别（仅违规类）
-
-# -----------------------------------------------------------------------------
-# 帧推送配置
-# -----------------------------------------------------------------------------
-frame_push:
-  enabled: true
-  url: "http://localhost:8080/api/vest-frames"  # 对方提供的接收地址
-  batch_interval_ms: 1000        # 批次间隔（毫秒）
-  max_frames_per_batch: 15       # 单批次帧数上限
-  jpeg_quality: 70               # JPEG 编码质量 (1-100)
-  timeout: 10                    # HTTP 请求超时（秒）
-  retries: 2                     # 失败重试次数
+  path: "runs/classify/yolo26cls_ppeVest_20260709_1036/weights/best.pt"   # 反光衣分类模型权重路径（第二阶段，相对于项目根目录）
+  person_model:                                                           # 人体检测模型（第一阶段），不配置则回退为单阶段模式
+    path: "yolo26n.pt"                                                    # COCO 预训练模型，class 0 = person
+    conf: 0.5                                                            # 人体检测置信度阈值
+  conf: 0.8                                                               # 分类置信度阈值（低于此值的分类结果被忽略）
+  device: 0                                                                # GPU 设备 ID，null 或 "cpu" 表示 CPU
+  target_classes: ['no_vest']                                                 # 触发告警的目标类别（必须与模型输出类别名一致）
 
 # -----------------------------------------------------------------------------
 # 摄像头列表
@@ -49,8 +24,8 @@ frame_push:
 cameras:
   - id: "gate"
     name: "测试"
-    type: "local"                                                       # rtsp | local，默认 rtsp
-    # rtsp_url: "rtsp://118.140.130.26:8554/dahua1003362"
+    # type: "local"                                                       # rtsp | local，默认 rtsp
+    rtsp_url: "rtsp://118.140.130.26:8554/dahua1003362"
     enabled: true
 
   # --- 本地摄像头（USB / 内置），测试用 ---
@@ -64,14 +39,24 @@ cameras:
 # 告警参数
 # -----------------------------------------------------------------------------
 alert:
+  debug_render: true             # true=详细标注（cigarette位置+置信度），false=简洁标注（仅人体框+SMOKING）
   cooldown_seconds: 10           # 同一摄像头两次告警的最小间隔（秒）
-  min_detection_count: 1         # 连续检测到目标的帧数阈值（防止单帧误报）
+  min_detection_count: 5         # 连续检测到抽烟的帧数阈值（防止单帧误报）
   save_frame_overlay: false      # 是否在证据帧上叠加摄像头名称/时间水印（摄像头流已自带则无需）
 
   webhook:
-    url: "http://localhost:9999/api/vest-alert"  # Webhook 接收地址
-    timeout: 10                                   # 请求超时（秒）
-    retries: 2                                    # 失败重试次数
+    url: "http://localhost:9999/api/smoke-alert"   # Webhook 接收地址
+    timeout: 10                                     # 请求超时（秒）
+    retries: 2                                      # 失败重试次数
+
+# -----------------------------------------------------------------------------
+# 视频流预览（可选）
+# -----------------------------------------------------------------------------
+# 取消注释即启用 MJPEG 实时视频流；注释掉即关闭。
+preview:
+  host: "0.0.0.0"
+  port: 8080
+  jpeg_quality: 30
 
 # -----------------------------------------------------------------------------
 # 日志参数

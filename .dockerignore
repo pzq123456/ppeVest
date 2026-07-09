@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 虚拟环境 & 依赖锁
+.venv/
+uv.lock
+.python-version
+
+# Git
+.git/
+
+# 模型文件（通过 volume 挂载，不进镜像）
+*.pt
+*.onnx
+*.engine
+
+# 训练产物 & 数据
+runs/
+smoking*/
+tmp/
+
+# 部署工作区
+deploy/
+
+# 告警 & 日志（运行时产出）
+alerts/
+logs/
+
+# 测试工具（不部署）
+local/
+
+# 开发环境
+.devcontainer/
+
+# 根目录遗留脚本
+main.py
+train.py
+
+# IDE
+.vscode/
+.idea/

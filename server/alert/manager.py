@@ -2,125 +2,137 @@
 告警管理器
 - 冷却期控制：同一摄像头两次告警的最小间隔
 - 连续帧确认：连续 N 帧检测到才触发告警（防止单帧误报）
-- 帧标注：检测框 + 可选文字水印 → base64 编码
-- 告警分发：调用 Webhook 等渠道推送
+- 告警分发：从预览管线获取已渲染帧快照 → executor 线程完成 JPEG 编码 →
+           daemon 线程 fire-and-forget 完成 base64/JSON/HTTP 推送
+  检测线程仅做决策，不做图片。
 """
 
 import base64
+import threading
 import time
 from datetime import datetime, timezone
 
 import cv2
+import simplejpeg
 from loguru import logger
 
-from server.core.detector import Detection
+from server.core.detector import ObjectMeta
 from server.alert.webhook import WebhookAlerter
 
 
 class AlertManager:
-    """管理单路摄像头的告警状态与分发。"""
+    """管理单路摄像头的告警状态与分发。
+
+    检测线程仅做轻量决策（冷却期 / 连续帧确认）。
+    JPEG 编码在 executor 线程执行，base64/JSON/HTTP POST
+    由独立 daemon 线程 fire-and-forget，不做任何等待。
+    """
 
     def __init__(
         self,
         camera_id: str,
         camera_name: str,
         target_classes: list[str] | None = None,
-        require_all_targets: bool | None = None,
         save_frame_overlay: bool = False,
         cooldown_seconds: float = 30.0,
         min_detection_count: int = 3,
+        debug_render: bool = False,
         webhook: WebhookAlerter | None = None,
     ):
         """
         Args:
             camera_id: 摄像头唯一 ID
             camera_name: 摄像头显示名称
-            target_classes: 触发告警的目标类别列表，None 则匹配所有检测
-            require_all_targets: True 时要求所有 target_classes 同时存在才计数；None（默认）时多类别自动 AND，单类别 OR
+            target_classes: 触发告警的目标类别列表，None 则匹配所有检测。
+                            会同时匹配 ObjectMeta.class_name 和 attributes 中的 name。
             save_frame_overlay: 是否在证据帧上叠加摄像头名称/时间水印
             cooldown_seconds: 同一摄像头两次告警的最小间隔（秒）
-            min_detection_count: 连续检测到抽烟的帧数阈值
+            min_detection_count: 连续检测到目标的帧数阈值
+            debug_render: True=详细标注，False=简洁标注（仅人体框+SMOKING）
             webhook: Webhook 推送实例，None 则不推送
         """
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.target_classes = target_classes
-        # 智能默认：多类别时默认 AND（如 face+smoking 缺一不可），单类别时 OR；显式指定优先
-        if require_all_targets is None:
-            self.require_all_targets = (
-                len(target_classes) >= 2 if target_classes else False
-            )
-        else:
-            self.require_all_targets = require_all_targets
         self.save_frame_overlay = save_frame_overlay
         self.cooldown_seconds = cooldown_seconds
         self.min_detection_count = min_detection_count
+        self.debug_render = debug_render
         self.webhook = webhook
 
         # 内部状态
-        self._consecutive_hits = 0          # 连续检测到抽烟的帧数
-        self._last_alert_time: float = 0.0  # 上一次告警的 Unix 时间戳
+        self._consecutive_hits = 0
+        self._last_alert_time: float = 0.0
 
     # ------------------------------------------------------------------
-    # 主入口：每帧调用
+    # 主入口：每帧调用（检测线程，仅做决策，不做图片）
     # ------------------------------------------------------------------
-    def handle(self, frame, detections: list[Detection]) -> bool:
+    def handle(self, objects: list[ObjectMeta],
+               snapshot=None, executor=None) -> bool:
         """
         处理一帧的检测结果，决定是否触发告警。
 
+        本方法在检测线程中运行，仅执行轻量决策逻辑。
+        所有渲染/编码/网络 I/O 均通过 executor 异步卸载。
+
         Args:
-            frame: 原始帧（未标注）
-            detections: detect() 返回的检测列表
+            objects: detect() 返回的 ObjectMeta 列表
+            snapshot: 预览管线已渲染的 OSD 帧（BGR numpy 数组），None 表示暂无预览帧
+            executor: 可选 ThreadPoolExecutor，用于异步执行 webhook 推送
 
         Returns:
             True 表示触发了告警
         """
         try:
-            # 按配置的目标类别过滤（None 表示匹配所有检测）
-            if self.target_classes is not None:
-                if self.require_all_targets:
-                    # 要求所有 target_classes 同时存在才计数（如 face + smoking）
-                    detected_classes = {d.class_name for d in detections}
-                    if not all(cls in detected_classes for cls in self.target_classes):
-                        target_detections = []
-                    else:
-                        target_detections = [
-                            d for d in detections if d.class_name in self.target_classes
-                        ]
-                else:
-                    target_detections = [
-                        d for d in detections if d.class_name in self.target_classes
-                    ]
-            else:
-                target_detections = detections
+            # 按 target_classes 过滤：匹配主实体 class_name 或其属性的 name
+            alert_objects = self._find_alert_objects(objects)
 
-            if target_detections:
+            if alert_objects:
                 self._consecutive_hits += 1
-                logger.debug(
-                    "[{}] 检测到目标: {} 个, 连续 {}/{} 帧",
-                    self.camera_name,
-                    len(target_detections),
-                    self._consecutive_hits,
-                    self.min_detection_count,
-                )
+                for obj in alert_objects:
+                    attr_names = [a.name for a in obj.attributes]
+                    logger.debug("detect camera={} class={} attrs={} hits={}/{}",
+                                 self.camera_name, obj.class_name, attr_names,
+                                 self._consecutive_hits, self.min_detection_count)
 
                 if self._consecutive_hits >= self.min_detection_count:
                     if self._cooldown_passed():
-                        self._trigger(frame, target_detections)
+                        self._trigger(snapshot, alert_objects, executor=executor)
                         self._consecutive_hits = 0
                         return True
                     else:
-                        # 冷却中，重置计数器避免冷却结束后立即再次触发
+                        remain = self.cooldown_seconds - (time.time() - self._last_alert_time)
+                        logger.debug("skip camera={} reason=cooldown remain={:.0f}s",
+                                     self.camera_name, remain)
                         self._consecutive_hits = 0
             else:
                 # 无检测 → 递减计数器（逐步递减，容忍偶尔丢帧）
                 if self._consecutive_hits > 0:
                     self._consecutive_hits -= 1
+                    logger.debug("hits camera={} {}→{}", self.camera_name,
+                                 self._consecutive_hits + 1, self._consecutive_hits)
 
             return False
         except Exception:
             logger.exception("[{}] 告警处理异常，跳过本帧", self.camera_name)
             return False
+
+    def _find_alert_objects(self, objects: list[ObjectMeta]) -> list[ObjectMeta]:
+        """找出触发告警的实体。
+
+        匹配规则（两级）：
+        1. ObjectMeta.class_name 在 target_classes 中（单阶段：cigarette 直接命中）
+        2. 任意 AttributeMeta.name 在 target_classes 中（两阶段：person 拥有 cigarette 属性）
+
+        target_classes 为 None 时返回全部实体。
+        """
+        if self.target_classes is None:
+            return objects
+        return [
+            obj for obj in objects
+            if obj.class_name in self.target_classes
+            or any(attr.name in self.target_classes for attr in obj.attributes)
+        ]
 
     # ------------------------------------------------------------------
     # 内部方法
@@ -130,67 +142,134 @@ class AlertManager:
         elapsed = time.time() - self._last_alert_time
         return elapsed >= self.cooldown_seconds
 
-    def _trigger(self, frame, detections: list[Detection]):
-        """触发告警：标注帧 → base64 编码 → 推送 Webhook。"""
+    def _trigger(self, snapshot, alert_objects: list[ObjectMeta], executor=None):
+        """触发告警：轻量调度 → 卸载所有重操作到 executor。
+
+        本方法在检测线程中运行，仅做日志记录和状态更新。
+        JPEG 编码 / base64 / JSON / HTTP POST 全部在 _build_and_send 中执行。
+
+        Args:
+            snapshot: 预览管线已渲染的 OSD 帧（BGR numpy 数组），None 表示暂无预览帧
+            alert_objects: 触发告警的 ObjectMeta 列表
+            executor: 可选 ThreadPoolExecutor
+        """
         now = datetime.now(timezone.utc)
-        timestamp_str = now.strftime("%Y%m%d_%H%M%S")
         iso_timestamp = now.isoformat()
 
-        logger.info(
-            "🚨 告警触发 [{}] {} 个目标",
-            self.camera_name, len(detections),
-        )
+        # 在 reset 前捕获当前命中计数（executor 线程稍后读取）
+        hits = self._consecutive_hits
 
-        # 1. 标注检测框
-        annotated = frame.copy()
-        for d in detections:
-            x1, y1, x2, y2 = d.bbox
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            label = f"{d.class_name} {d.confidence:.2f}"
-            cv2.putText(
-                annotated, label,
-                (x1, max(y1 - 8, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
-            )
-
-        # 2. 可选：叠加摄像头/时间水印
-        if self.save_frame_overlay:
-            overlay_text = [
-                f"Camera: {self.camera_name} ({self.camera_id})",
-                f"Time: {now.strftime('%Y-%m-%d %H:%M:%S')}",
-            ]
-            for i, text in enumerate(overlay_text):
-                cv2.putText(
-                    annotated, text,
-                    (10, 30 + i * 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-                )
-
-        # 3. 编码为 base64
-        _, buffer = cv2.imencode(".jpg", annotated)
-        frame_base64 = base64.b64encode(buffer).decode("utf-8")
-
-        # 4. 构建告警 payload
-        payload = {
-            "camera_id": self.camera_id,
-            "camera_name": self.camera_name,
-            "timestamp": iso_timestamp,
-            "detections": [
-                {
-                    "class": d.class_name,
-                    "confidence": round(d.confidence, 3),
-                    "bbox": list(d.bbox),
-                }
-                for d in detections
-            ],
-            "frame_base64": frame_base64,
-        }
-
-        # 5. 推送 Webhook（失败不影响主流程）
-        if self.webhook:
-            try:
-                self.webhook.send(payload)
-            except Exception:
-                logger.exception("Webhook 推送异常")
+        best_obj = max(alert_objects, key=lambda o: o.confidence)
+        logger.info("🚨 alert camera={} class={} conf={:.2f} hits={}/{}",
+                    self.camera_name, best_obj.class_name, best_obj.confidence,
+                    hits, self.min_detection_count)
 
         self._last_alert_time = time.time()
+
+        # JPEG 编码在 executor 线程，base64/JSON/HTTP 由 daemon 线程 fire-and-forget
+        if self.webhook and executor is not None and snapshot is not None:
+            executor.submit(
+                self._build_and_send,
+                snapshot, alert_objects, iso_timestamp, hits,
+            )
+        elif self.webhook and snapshot is None:
+            logger.warning(
+                "[{}] 告警触发但无预览帧可用，跳过证据帧",
+                self.camera_name,
+            )
+
+    # ------------------------------------------------------------------
+    # 后台线程：JPEG 编码（executor）→ fire-and-forget 推送（daemon）
+    # ------------------------------------------------------------------
+    def _build_and_send(self, snapshot, alert_objects: list[ObjectMeta],
+                        iso_timestamp: str, hits: int):
+        """JPEG 编码在 executor 线程执行（C 扩展，释放 GIL）。
+
+        base64 / JSON / HTTP POST 交由独立 daemon 线程 fire-and-forget，
+        executor 线程立即返回，不等待网络响应。
+        """
+        try:
+            # 1. 可选调试叠加层（cv2 为 C 扩展，释放 GIL）
+            if self.debug_render:
+                cv2.putText(snapshot,
+                            f"hits: {hits}/{self.min_detection_count}",
+                            (10, snapshot.shape[0] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                y_offset = 30
+                for obj in alert_objects:
+                    cv2.putText(snapshot,
+                                f"person {obj.confidence:.2f}",
+                                (10, snapshot.shape[0] - 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+                    y_offset += 20
+
+            # 2. 可选：摄像头/时间水印
+            if self.save_frame_overlay:
+                overlay_text = [
+                    f"Camera: {self.camera_name} ({self.camera_id})",
+                    f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}",
+                ]
+                for i, text in enumerate(overlay_text):
+                    cv2.putText(
+                        snapshot, text,
+                        (10, 30 + i * 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+                    )
+
+            # 3. JPEG 编码（C 扩展，释放 GIL）— executor 线程唯一重操作
+            buffer = simplejpeg.encode_jpeg(snapshot, quality=85, colorspace='BGR')
+
+            # 4. Fire-and-forget: base64 → JSON → HTTP 全部在独立 daemon 线程
+            threading.Thread(
+                target=self._send_payload,
+                args=(buffer, alert_objects, iso_timestamp),
+                daemon=True,
+                name=f"webhook-send-{self.camera_id}",
+            ).start()
+
+        except Exception:
+            logger.exception("Webhook 构建异常")
+
+    def _send_payload(self, buffer: bytes, alert_objects: list[ObjectMeta],
+                      iso_timestamp: str):
+        """Fire-and-forget: base64 → JSON → HTTP POST。独立 daemon 线程。
+
+        GIL 密集操作（base64、json.dumps）和阻塞 I/O（HTTP）均在此线程完成，
+        不阻塞 executor 线程或检测/预览管线。
+        """
+        try:
+            # 1. Base64 编码
+            frame_base64 = base64.b64encode(buffer).decode("utf-8")
+
+            # 2. 构建告警 payload
+            objects_payload = []
+            for obj in alert_objects:
+                entry = {
+                    "class": obj.class_name,
+                    "confidence": round(obj.confidence, 3),
+                    "bbox": list(obj.bbox),
+                }
+                if self.debug_render and obj.attributes:
+                    entry["attributes"] = [
+                        {
+                            "class": attr.name,
+                            "confidence": round(attr.confidence, 3),
+                            "bbox": list(attr.bbox) if attr.bbox is not None else None,
+                        }
+                        for attr in obj.attributes
+                    ]
+                objects_payload.append(entry)
+
+            payload = {
+                "camera_id": self.camera_id,
+                "camera_name": self.camera_name,
+                "timestamp": iso_timestamp,
+                "objects": objects_payload,
+                "frame_base64": frame_base64,
+            }
+
+            # 3. HTTP POST（阻塞 I/O，释放 GIL）
+            self.webhook.send(payload)
+
+        except Exception:
+            logger.exception("Webhook 推送异常")

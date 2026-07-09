@@ -48,7 +48,7 @@ def main():
     detect_model = YOLO(str(detect_model_path), task="detect")
 
     # 2. 加载你训练的二分类模型（vest/no_vest）
-    cls_model_path = script_dir / "runs" / "yolo26n_vest_cls_20260630_1107" / "weights" / "best.pt"
+    cls_model_path = script_dir / "runs" / "classify" / "yolo26cls_ppeVest_20260709_1344" / "weights" / "best.pt"
     if not cls_model_path.exists():
         print(f"错误：找不到分类模型 {cls_model_path}")
         return
@@ -57,9 +57,9 @@ def main():
 
     # 3. 选择视频源
     # source = 0  # 本地摄像头
-    # source = RTSP_SOURCES["dahua1"]  # 使用dahua1
+    source = RTSP_SOURCES["dahua1"]  # 使用dahua1
     # source = RTSP_SOURCES["dahua2"]  # 使用dahua2
-    source = RTSP_SOURCES["dahua3"]  # 使用dahua3
+    # source = RTSP_SOURCES["dahua3"]  # 使用dahua3
 
     print(f"使用视频源: {source}")
 
