@@ -27,7 +27,7 @@ COCO_CLASSES = {
 
 RTSP_SOURCES = {
     "dahua1": "rtsp://118.140.234.166:8554/dahua1001722",
-    "dahua2": "rtsp://118.140.130.26:8554/dahua1005189",
+    "dahua2": "rtsp://118.140.234.166:8554/dahua1000352",
     "dahua3": "rtsp://118.140.130.26:8554/dahua1003362",
 }
 
@@ -48,7 +48,7 @@ def main():
     detect_model = YOLO(str(detect_model_path), task="detect")
 
     # 2. 加载你训练的二分类模型（vest/no_vest）
-    cls_model_path = script_dir / "runs" / "classify" / "yolo26cls_ppeVest_20260709_1344" / "weights" / "best.pt"
+    cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260813_1424" / "weights" / "best.pt"
     if not cls_model_path.exists():
         print(f"错误：找不到分类模型 {cls_model_path}")
         return
@@ -57,8 +57,8 @@ def main():
 
     # 3. 选择视频源
     # source = 0  # 本地摄像头
-    source = RTSP_SOURCES["dahua1"]  # 使用dahua1
-    # source = RTSP_SOURCES["dahua2"]  # 使用dahua2
+    # source = RTSP_SOURCES["dahua1"]  # 使用dahua1
+    source = RTSP_SOURCES["dahua2"]  # 使用dahua2
     # source = RTSP_SOURCES["dahua3"]  # 使用dahua3
 
     print(f"使用视频源: {source}")

@@ -20,3 +20,8 @@ logs
 tmp
 alerts
 vest_cls2
+
+dataset
+# Human annotate log
+.annotate_log.csv
+*.tar.gz
