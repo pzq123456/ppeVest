@@ -49,8 +49,8 @@ def main():
 
     # 2. 加载你训练的二分类模型（vest/no_vest）
     # cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260813_1424" / "weights" / "best.pt"
-    # cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260820_0923" / "weights" / "best.pt"
-    cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260820_1710" / "weights" / "best.pt"
+    cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260820_0923" / "weights" / "best.pt"
+    # cls_model_path = script_dir / "runs" / "classify" / "yolo26mcls_ppeVest_20260820_1710" / "weights" / "best.pt"
 
     if not cls_model_path.exists():
         print(f"错误：找不到分类模型 {cls_model_path}")
