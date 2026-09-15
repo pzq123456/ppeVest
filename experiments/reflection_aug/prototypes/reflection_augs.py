@@ -60,8 +60,9 @@ def night_retroreflection(bgr: np.ndarray, rng: np.random.Generator) -> np.ndarr
     # 1) 在原始亮度上先找条带 (压暗后再找就找不到了)
     strip = _stripe_mask(bgr, v_thresh=rng.uniform(150, 185), s_thresh=rng.uniform(55, 80))
 
-    # 2) 全局压暗: gamma 0.25~0.45, 再叠一点蓝色调 (夜视偏冷)
-    gamma = rng.uniform(0.25, 0.45)
+    # 2) 全局压暗: gamma 0.5~0.7（温和版，原 0.25~0.45 会把背景压成纯黑，
+    #    现场夜间再暗也有环境光/ISP 增益，不可能全黑），再叠一点蓝色调 (夜视偏冷)
+    gamma = rng.uniform(0.5, 0.7)
     v_dark = 255.0 * np.power(v / 255.0, 1.0 / max(gamma, 1e-6))
     v_dark *= rng.uniform(0.85, 1.0)
     s_night = s * rng.uniform(0.6, 0.85)  # 夜间饱和度下降
@@ -93,15 +94,19 @@ def night_retroreflection(bgr: np.ndarray, rng: np.random.Generator) -> np.ndarr
 
 
 def lowlight_degrade(bgr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """整体很暗 + 强噪声, 反光条仅隐约可辨 (夜间无直射光源)."""
-    gamma = rng.uniform(0.18, 0.32)
+    """整体偏暗 + 噪声, 反光条隐约可辨但人体轮廓必须保留 (夜间无直射光源)。
+
+    温和版：gamma 0.55~0.75（原 0.18~0.32，指数压暗 3~5 倍，整图只剩噪声，
+    现实中不存在），噪声同步减半。
+    """
+    gamma = rng.uniform(0.55, 0.75)
     h_u8, s, v, _ = _to_hsv_v(bgr)
-    v_dark = 255.0 * np.power(v / 255.0, 1.0 / gamma) * rng.uniform(0.7, 0.95)
+    v_dark = 255.0 * np.power(v / 255.0, 1.0 / gamma) * rng.uniform(0.85, 1.0)
     s_dark = s * rng.uniform(0.5, 0.8)
     out = _merge_hsv(h_u8, s_dark, v_dark).astype(np.float32)
 
     # 高增益传感器噪声 + 轻微色偏
-    noise = rng.normal(0, rng.uniform(8, 16), out.shape).astype(np.float32)
+    noise = rng.normal(0, rng.uniform(4, 8), out.shape).astype(np.float32)
     out = np.clip(out + noise, 0, 255).astype(np.uint8)
     b, g, r = cv2.split(out)
     b = cv2.convertScaleAbs(b, alpha=1.0, beta=rng.uniform(2, 8))
@@ -174,10 +179,12 @@ def flashlight_partial(bgr: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     spot = np.exp(-d2 * 1.5).astype(np.float32)  # 中心1 边缘0
     spot = cv2.GaussianBlur(spot, (0, 0), sigmaX=rng.uniform(5, 15))
 
-    gamma = rng.uniform(0.15, 0.3)
+    # 温和版：gamma 0.45~0.65（原 0.15~0.3，暗区直接归零），且暗区保留
+    # 原图 35% 亮度下限（手电没照到的地方是暗，不是黑）。
+    gamma = rng.uniform(0.45, 0.65)
     h_u8, s, v, _ = _to_hsv_v(bgr)
-    v_dark = 255.0 * np.power(v / 255.0, 1.0 / gamma)
-    gain = rng.uniform(1.3, 1.8)
+    v_dark = np.maximum(255.0 * np.power(v / 255.0, 1.0 / gamma), v * 0.35)
+    gain = rng.uniform(1.2, 1.5)
     v_out = v_dark * (1 - spot) + np.clip(v * gain, 0, 255) * spot
     s_out = s * (1 - spot * 0.4)  # 亮区去饱和
     out = _merge_hsv(h_u8, s_out, v_out)
